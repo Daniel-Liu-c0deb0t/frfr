@@ -1,51 +1,11 @@
-pub fn fracminhash(seq: &[u8], k: usize, frac: usize, res: &mut Vec<(u32, usize)>) {
-    let threshold = std::u64::MAX / (frac as u64);
-    let mut curr = 0u64;
-
-    for (i, w) in seq.windows(k).enumerate() {
-        curr |= ;
-        let h = hash_u64(curr) as u32;
-
-        if h <= frac {
-            res.push((h, i));
-        }
-    }
-}
-
-pub fn align_u32(mut a: &[u32], mut b: &[u32], k: i32) -> i32 {
-    if a.len() > b.len() {
+pub fn align(mut a: &[u8], mut a_len: usize, mut b: &[u8], mut b_len: usize, k: i32) -> i32 {
+    if a_len > b_len {
         std::mem::swap(&mut a, &mut b);
+        std::mem::swap(&mut a_len, &mut b_len);
     }
 
-    let len_diff = (b.len() - a.len()) as i32;
-
-    if len_diff > k {
-        return None;
-    }
-
-    let main_diag = k + 1;
-    let mut curr_fr = vec![-1i32; k * 2 + 3];
-    let mut prev_fr = vec![-1i32; k * 2 + 3];
-
-    for curr_k in 0..=k {
-        let lo = ;
-        let hi = ;
-
-        for d in lo..hi {
-
-        }
-
-        std::mem::swap(&mut curr_fr, &mut prev_fr);
-    }
-}
-
-pub fn align(mut a: &[u8], mut b: &[u8], k: i32) -> i32 {
-    if a.len() > b.len() {
-        std::mem::swap(&mut a, &mut b);
-    }
-
-    let a_len = a.len() as i32;
-    let b_len = b.len() as i32;
+    let a_len = a_len as i32;
+    let b_len = b_len as i32;
     let len_diff = b_len - a_len;
 
     if len_diff > k {
@@ -60,16 +20,23 @@ pub fn align(mut a: &[u8], mut b: &[u8], k: i32) -> i32 {
         let lo = main_diag - (curr_k.min((k - len_diff) / 2) + 1);
         let hi = main_diag + (curr_k.min((k - len_diff) / 2 + len_diff) + 1);
 
-        for d in lo..hi {
-            let fr = curr_fr[(d - 1) as usize]
-                .max(curr_fr[d as usize] + 1)
-                .max(curr_fr[(d + 1) as usize] + 1);
+        for d in lo..=hi {
+            let prev_fr_ptr = prev_fr.as_ptr();
+            let fr = *prev_fr_ptr.add((d - 1) as usize)
+                .max(*prev_fr_ptr.add((d as usize) + 1)
+                .max(*prev_fr_ptr.add((d + 1) as usize) + 1);
 
-            if fr < a_len && d - main_diag + fr < b_len {
-                fr += extend(&a[fr as usize..], &b[(d - main_diag + fr) as usize..]);
-            }
+            fr += lcp(a.as_ptr(), a_len, fr, b.as_ptr(), b_len, d - main_diag + fr);
+            *curr_fr.as_mut_ptr().add(d as usize) = fr;
+        }
 
-            if d + a_len - main_diag == b_len && fr >= a_len {
+        let diag_end_b_hi = hi + a_len - main_diag;
+
+        if b_len <= diag_end_b_hi {
+            let d = len_diff + main_diag;
+            let fr = *curr_fr.as_ptr().add(d as usize);
+
+            if fr >= a_len {
                 return Some(curr_k);
             }
         }
@@ -80,13 +47,95 @@ pub fn align(mut a: &[u8], mut b: &[u8], k: i32) -> i32 {
     None
 }
 
-pub fn lcp(a: &[u8], b: &[u8]) -> i32 {
+pub fn simd_align(mut a: &[u8], mut a_len: usize, mut b: &[u8], mut b_len: usize, k: i32) -> i32 {
+    if a_len > b_len {
+        std::mem::swap(&mut a, &mut b);
+        std::mem::swap(&mut a_len, &mut b_len);
+    }
+
+    let a_len = a_len as i32;
+    let b_len = b_len as i32;
+    let len_diff = b_len - a_len;
+
+    if len_diff > k {
+        return None;
+    }
+
+    let main_diag = k + 1;
+    let mut curr_fr = vec![-1i32; k * 2 + 3];
+    let mut prev_fr = vec![-1i32; k * 2 + 3];
+    const L: usize = 8;
+
+    for curr_k in 0..=k {
+        let lo = main_diag - (curr_k.min((k - len_diff) / 2) + 1);
+        let hi = main_diag + (curr_k.min((k - len_diff) / 2 + len_diff) + 1);
+        let mut curr_lo = lo;
+
+        let mut prev_fr_prev;
+        let mut prev_fr_curr = _mm256_loadu_si256(prev_fr.as_ptr().add(curr_lo - 1) as _);
+        let mut prev_fr_next = _mm256_loadu_si256(prev_fr.as_ptr().add(curr_lo) as _);
+
+        while curr_lo + L <= hi + 1 {
+            prev_fr_prev = prev_fr_curr;
+            prev_fr_curr = prev_fr_next;
+            prev_fr_next = _mm256_loadu_si256(prev_fr.as_ptr().add(curr_lo + 1) as _);
+            let mut fr = simd_max_fr(prev_fr_prev, prev_fr_curr, prev_fr_next);
+
+            let fr_b = simd_b_idx(fr, curr_lo, main_diag);
+            let a_13 = simd_read_13(a.as_ptr(), fr);
+            let b_13 = simd_read_13(b.as_ptr(), fr_b);
+            let (lcp, mut too_long) = simd_lcp_13(a_13, b_13);
+            fr = _mm256_add_epi32(fr, lcp);
+            _mm256_storeu_si256(curr_fr.as_ptr().add(curr_lo) as _, fr);
+
+            while too_long > 0 {
+                let d = curr_lo + too_long.trailing_zeros();
+                let mut fr = *curr_fr.as_ptr().add(d as usize);
+                fr += lcp(a.as_ptr(), a_len, fr, b.as_ptr(), b_len, d - main_diag + fr);
+                *curr_fr.as_mut_ptr().add(d as usize) = fr;
+
+                too_long &= too_long - 1;
+            }
+
+            curr_lo += L;
+        }
+
+        for d in curr_lo..=hi {
+            let prev_fr_ptr = prev_fr.as_ptr();
+            let fr = *prev_fr_ptr.add((d - 1) as usize)
+                .max(*prev_fr_ptr.add(d as usize) + 1)
+                .max(*prev_fr_ptr.add((d + 1) as usize) + 1);
+
+            fr += lcp(a.as_ptr(), a_len, fr, b.as_ptr(), b_len, d - main_diag + fr);
+            *curr_fr.as_mut_ptr().add(d as usize) = fr;
+        }
+
+        let diag_end_b_hi = hi + a_len - main_diag;
+
+        if b_len <= diag_end_b_hi {
+            let d = len_diff + main_diag;
+            let fr = *curr_fr.as_ptr().add(d as usize);
+
+            if fr >= a_len {
+                return Some(curr_k);
+            }
+        }
+
+        std::mem::swap(&mut curr_fr, &mut prev_fr);
+    }
+
+    None
+}
+
+pub fn lcp(a: *const u8, a_len: i32, a_i: i32, b: *const u8, b_len: i32, b_i: i32) -> i32 {
     const L: usize = 29;
+    let mut a_i = a_i as usize;
+    let mut b_i = b_i as usize;
     let mut idx = 0;
 
-    while idx + L <= a.len() && idx + L <= b.len() {
-        let a_v = read_29(a, idx);
-        let b_v = read_29(b, idx);
+    while a_i + idx < (a_len as usize) && b_i + idx < (b_len as usize) {
+        let a_v = read_29(a, a_i + idx);
+        let b_v = read_29(b, b_i + idx);
         let xor = a_v ^ b_v;
 
         if xor > 0 {
@@ -97,28 +146,76 @@ pub fn lcp(a: &[u8], b: &[u8]) -> i32 {
         idx += L;
     }
 
-    idx // TODO
+    idx
 }
 
-pub fn read_29(a: &[u8], i: usize) -> u64 {
-    let mut v = std::ptr::read_unaligned(a.as_ptr().add(i / 4) as *const u64);
+pub fn read_29(a: *const u8, i: usize) -> u64 {
+    let mut v = std::ptr::read_unaligned(a.add(i / 4) as *const u64);
     v >>= (i % 4) * 2;
     v &= (-1i64 as u64) >> 6;
     v
 }
 
-pub fn simd_lcp(a: __m256i, b: __m256i) -> __m256i {
-    let xor = _mm256_xor_si256(a, b);
-    let lsb = _mm256_and_si256(xor, _mm256_sub_epi32(0, xor));
-    let f = _mm256_castps_si256(_mm256_cvtepi32_ps(xor));
-    let exp = _mm256_srai_epi32(f, 23);
-    let v = _mm256_sub_epi32(exp, _mm256_set1_epi8(127));
-    _mm256_srai_epi32(v, 1)
+pub fn simd_b_idx(fr: __m256i, lo: i32, main_diag: i32) -> __m256i {
+    let main_diag = _mm256_set1_epi32(main_diag);
+    let i = _mm256_set_epi32(7, 6, 5, 4, 3, 2, 1, 0);
+    let d = _mm256_add_epi32(_mm256_set1_epi32(lo), i);
+    _mm256_add_epi32(_mm256_sub_epi32(d, main_diag), fr)
 }
 
-pub fn simd_read_13(a: &[u8], i: __m256i) -> __m256i {
-    let mut v = _mm256_i32gather_epi32(a.as_ptr() as _, _mm256_srli_epi32(i, 2));
+pub fn simd_max_fr(prev: __m256i, curr: __m256i, next: __m256i) -> __m256i {
+    let ones = _mm256_set1_epi32(1);
+    let curr = _mm256_add_epi32(curr, ones);
+    let next = _mm256_add_epi32(next, ones);
+    _mm256_max_epi32(prev, _mm256_max_epi32(curr, next))
+}
+
+pub fn simd_lcp_13(a: __m256i, b: __m256i) -> (__m256i, u8) {
+    let xor = _mm256_xor_si256(a, b);
+    let lsb = _mm256_and_si256(xor, _mm256_sub_epi32(_mm256_set1_epi32(0), xor));
+    let f = _mm256_castps_si256(_mm256_cvtepi32_ps(xor));
+    let exp = _mm256_srai_epi32(f, 23);
+    let v = _mm256_sub_epi32(exp, _mm256_set1_epi32(127));
+    let too_long = _mm256_movemask_ps(v) as u8;
+    let v = _mm256_srai_epi32(v, 1);
+    let lcp = _mm256_min_epu32(v, _mm256_set1_epi32(13));
+    (lcp, too_long)
+}
+
+pub fn simd_read_13(a: *const u8, i: __m256i) -> __m256i {
+    let mut v = _mm256_i32gather_epi32(a as _, _mm256_srli_epi32(i, 2), 1);
     v = _mm256_srlv_epi32(v, _mm256_slli_epi32(_mm256_and_si256(i, _mm256_set1_epi32(0b11)), 1));
     v = _mm256_and_si256(v, _mm256_set1_epi32(((-1i32 as u32) >> 6) as i32));
     v
+}
+
+static LUT: [u8; 128] = {
+    let mut l = [0u8; 128];
+    l[b'A' as usize] = 0b00;
+    l[b'a' as usize] = 0b00;
+    l[b'C' as usize] = 0b01;
+    l[b'c' as usize] = 0b01;
+    l[b'G' as usize] = 0b10;
+    l[b'g' as usize] = 0b10;
+    l[b'T' as usize] = 0b11;
+    l[b't' as usize] = 0b11;
+    l
+};
+
+pub fn encode(seq: &[u8], res: &mut Vec<u8>) {
+    for c in seq.chunks(4) {
+        let mut b = 0u8;
+
+        for (i, &b) in c.iter().enumerate() {
+            b |= LUT[b as usize] << (i * 2);
+        }
+
+        res.push(b);
+    }
+}
+
+const PAD: usize = 16;
+
+pub fn pad(res: &mut Vec<u8>) {
+    res.resize(res.len() + PAD, 0u8);
 }
