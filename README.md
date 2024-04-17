@@ -1,2 +1,2 @@
 # frfr
-Parallelized Ukkonen/Myer's algorithm, fr fr.
+Parallelized Ukkonen/Myer's edit distance algorithm, fr fr.
