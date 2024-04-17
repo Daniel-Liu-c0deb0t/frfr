@@ -27,10 +27,11 @@ pub fn align(mut a: &[u8], mut a_len: usize, mut b: &[u8], mut b_len: usize, k: 
                 .max(*prev_fr_ptr.add((d + 1) as usize) + 1);
 
             fr += lcp(a.as_ptr(), a_len, fr, b.as_ptr(), b_len, d - main_diag + fr);
+            fr = fix_out_of_bounds(fr, d, main_diag, a_len, b_len);
             *curr_fr.as_mut_ptr().add(d as usize) = fr;
         }
 
-        let diag_end_b_hi = hi + a_len - main_diag;
+        let diag_end_b_hi = hi - main_diag + a_len;
 
         if b_len <= diag_end_b_hi {
             let d = len_diff + main_diag;
@@ -86,12 +87,14 @@ pub fn simd_align(mut a: &[u8], mut a_len: usize, mut b: &[u8], mut b_len: usize
             let b_13 = simd_read_13(b.as_ptr(), fr_b);
             let (lcp, mut too_long) = simd_lcp_13(a_13, b_13);
             fr = _mm256_add_epi32(fr, lcp);
+            fr = simd_fix_out_of_bounds(fr, curr_lo, main_diag, a_len, b_len);
             _mm256_storeu_si256(curr_fr.as_ptr().add(curr_lo) as _, fr);
 
             while too_long > 0 {
                 let d = curr_lo + too_long.trailing_zeros();
                 let mut fr = *curr_fr.as_ptr().add(d as usize);
                 fr += lcp(a.as_ptr(), a_len, fr, b.as_ptr(), b_len, d - main_diag + fr);
+                fr = fix_out_of_bounds(fr, d, main_diag, a_len, b_len);
                 *curr_fr.as_mut_ptr().add(d as usize) = fr;
 
                 too_long &= too_long - 1;
@@ -107,10 +110,11 @@ pub fn simd_align(mut a: &[u8], mut a_len: usize, mut b: &[u8], mut b_len: usize
                 .max(*prev_fr_ptr.add((d + 1) as usize) + 1);
 
             fr += lcp(a.as_ptr(), a_len, fr, b.as_ptr(), b_len, d - main_diag + fr);
+            fr = fix_out_of_bounds(fr, d, main_diag, a_len, b_len);
             *curr_fr.as_mut_ptr().add(d as usize) = fr;
         }
 
-        let diag_end_b_hi = hi + a_len - main_diag;
+        let diag_end_b_hi = hi - main_diag + a_len;
 
         if b_len <= diag_end_b_hi {
             let d = len_diff + main_diag;
@@ -156,11 +160,23 @@ pub fn read_29(a: *const u8, i: usize) -> u64 {
     v
 }
 
+pub fn fix_out_of_bounds(fr: i32, d: i32, main_diag: i32, a_len: i32, b_len: i32) -> i32 {
+    fr.min(a_len).min(b_len - d + main_diag)
+}
+
 pub fn simd_b_idx(fr: __m256i, lo: i32, main_diag: i32) -> __m256i {
     let main_diag = _mm256_set1_epi32(main_diag);
     let i = _mm256_set_epi32(7, 6, 5, 4, 3, 2, 1, 0);
     let d = _mm256_add_epi32(_mm256_set1_epi32(lo), i);
     _mm256_add_epi32(_mm256_sub_epi32(d, main_diag), fr)
+}
+
+pub fn simd_fix_out_of_bounds(fr: __m256i, lo: i32, main_diag: i32, a_len: i32, b_len: i32) -> __m256i {
+    let main_diag_b_len = _mm256_set1_epi32(main_diag + b_len);
+    let a_len = _mm256_set1_epi32(a_len);
+    let i = _mm256_set_epi32(7, 6, 5, 4, 3, 2, 1, 0);
+    let d = _mm256_add_epi32(_mm256_set1_epi32(lo), i);
+    _mm256_min_epi32(fr, _mm256_min_epi32(a_len, _mm256_sub_epi32(main_diag_b_len, d)))
 }
 
 pub fn simd_max_fr(prev: __m256i, curr: __m256i, next: __m256i) -> __m256i {
