@@ -148,7 +148,6 @@ pub unsafe fn simd_align<'a>(
 }
 
 #[inline]
-#[target_feature(enable = "avx2")]
 pub unsafe fn lcp(a: *const u8, a_len: i32, a_i: i32, b: *const u8, b_len: i32, b_i: i32) -> i32 {
     const L: usize = 29;
     let a_i = a_i as usize;
@@ -172,7 +171,6 @@ pub unsafe fn lcp(a: *const u8, a_len: i32, a_i: i32, b: *const u8, b_len: i32, 
 }
 
 #[inline]
-#[target_feature(enable = "avx2")]
 pub unsafe fn read_29(a: *const u8, i: usize) -> u64 {
     let mut v = std::ptr::read_unaligned(a.add(i / 4) as *const u64);
     v >>= (i % 4) * 2;
@@ -181,7 +179,6 @@ pub unsafe fn read_29(a: *const u8, i: usize) -> u64 {
 }
 
 #[inline]
-#[target_feature(enable = "avx2")]
 pub unsafe fn fix_out_of_bounds(fr: i32, d: i32, main_diag: i32, a_len: i32, b_len: i32) -> i32 {
     fr.min(a_len).min(b_len - d + main_diag)
 }
