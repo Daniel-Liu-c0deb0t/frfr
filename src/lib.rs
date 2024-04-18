@@ -23,8 +23,8 @@ pub unsafe fn align<'a>(
     let mut prev_fr = vec![-1i32; (k as usize) * 2 + 3];
 
     for curr_k in 0..=k {
-        let lo = main_diag - (curr_k.min((k - len_diff) / 2) + 1);
-        let hi = main_diag + (curr_k.min((k - len_diff) / 2 + len_diff) + 1);
+        let lo = main_diag - curr_k.min((k - len_diff) / 2);
+        let hi = main_diag + curr_k.min((k - len_diff) / 2 + len_diff);
 
         for d in lo..=hi {
             let prev_fr_ptr = prev_fr.as_ptr();
@@ -86,19 +86,16 @@ pub unsafe fn simd_align<'a>(
     const L: i32 = 8;
 
     for curr_k in 0..=k {
-        let lo = main_diag - (curr_k.min((k - len_diff) / 2) + 1);
-        let hi = main_diag + (curr_k.min((k - len_diff) / 2 + len_diff) + 1);
+        let lo = main_diag - curr_k.min((k - len_diff) / 2);
+        let hi = main_diag + curr_k.min((k - len_diff) / 2 + len_diff);
         let mut curr_lo = lo;
 
-        let mut prev_fr_prev;
-        let mut prev_fr_curr =
-            _mm256_loadu_si256(prev_fr.as_ptr().add((curr_lo as usize) - 1) as _);
-        let mut prev_fr_next = _mm256_loadu_si256(prev_fr.as_ptr().add(curr_lo as usize) as _);
-
         while curr_lo + L <= hi + 1 {
-            prev_fr_prev = prev_fr_curr;
-            prev_fr_curr = prev_fr_next;
-            prev_fr_next = _mm256_loadu_si256(prev_fr.as_ptr().add((curr_lo as usize) + 1) as _);
+            let prev_fr_prev =
+                _mm256_loadu_si256(prev_fr.as_ptr().add((curr_lo as usize) - 1) as _);
+            let prev_fr_curr = _mm256_loadu_si256(prev_fr.as_ptr().add(curr_lo as usize) as _);
+            let prev_fr_next =
+                _mm256_loadu_si256(prev_fr.as_ptr().add((curr_lo as usize) + 1) as _);
             let mut fr = simd_max_fr(prev_fr_prev, prev_fr_curr, prev_fr_next);
 
             let fr_b = simd_b_idx(fr, curr_lo, main_diag);
@@ -281,4 +278,175 @@ const PAD: usize = 16;
 
 pub fn pad(res: &mut Vec<u8>) {
     res.resize(res.len() + PAD, 0u8);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lcp() {
+        unsafe {
+            let a = b"ATCGATCG";
+            let mut a2 = Vec::new();
+            encode(a, &mut a2);
+            pad(&mut a2);
+            let b = b"ATCGATCC";
+            let mut b2 = Vec::new();
+            encode(b, &mut b2);
+            pad(&mut b2);
+
+            let res = lcp(
+                a2.as_ptr(),
+                a.len() as i32,
+                0,
+                b2.as_ptr(),
+                b.len() as i32,
+                0,
+            );
+            assert_eq!(res, 7);
+        }
+    }
+
+    #[test]
+    fn test_align() {
+        unsafe {
+            let a = b"ATCGATCG";
+            let mut a2 = Vec::new();
+            encode(a, &mut a2);
+            pad(&mut a2);
+            let b = b"ATCATCC";
+            let mut b2 = Vec::new();
+            encode(b, &mut b2);
+            pad(&mut b2);
+
+            let res = align(&a2, a.len(), &b2, b.len(), 0);
+            assert_eq!(res, None);
+            let res = align(&a2, a.len(), &b2, b.len(), 1);
+            assert_eq!(res, None);
+            let res = align(&a2, a.len(), &b2, b.len(), 2);
+            assert_eq!(res, Some(2));
+            let res = align(&a2, a.len(), &b2, b.len(), 3);
+            assert_eq!(res, Some(2));
+        }
+    }
+
+    #[test]
+    fn test_simd_lcp() {
+        #[target_feature(enable = "avx2")]
+        unsafe fn inner() {
+            let a = _mm256_set1_epi32(0b11_10_01_00_11_10_01_00);
+            let b = _mm256_set1_epi32(0b11_11_01_00_11_10_01_00);
+            let (lcp, too_long) = simd_lcp_13(a, b);
+            let mut res = [0i32; 8];
+            _mm256_storeu_si256(res.as_mut_ptr() as _, lcp);
+            assert_eq!(res, [6i32; 8]);
+            assert_eq!(too_long, 0b00000000);
+
+            let (lcp, too_long) = simd_lcp_13(a, a);
+            let mut res = [0i32; 8];
+            _mm256_storeu_si256(res.as_mut_ptr() as _, lcp);
+            assert_eq!(res, [13i32; 8]);
+            assert_eq!(too_long, 0b11111111);
+        }
+
+        unsafe { inner() }
+    }
+
+    #[test]
+    fn test_simd_align() {
+        unsafe {
+            let a = b"ATCGATCG";
+            let mut a2 = Vec::new();
+            encode(a, &mut a2);
+            pad(&mut a2);
+            let b = b"ATCATCC";
+            let mut b2 = Vec::new();
+            encode(b, &mut b2);
+            pad(&mut b2);
+
+            let res = simd_align(&a2, a.len(), &b2, b.len(), 0);
+            assert_eq!(res, None);
+            let res = simd_align(&a2, a.len(), &b2, b.len(), 1);
+            assert_eq!(res, None);
+            let res = simd_align(&a2, a.len(), &b2, b.len(), 2);
+            assert_eq!(res, Some(2));
+            let res = simd_align(&a2, a.len(), &b2, b.len(), 3);
+            assert_eq!(res, Some(2));
+        }
+    }
+
+    #[test]
+    fn test_align_match() {
+        unsafe {
+            let a = b"AAAA".repeat(100);
+            let mut a2 = Vec::new();
+            encode(&a, &mut a2);
+            pad(&mut a2);
+            let b = b"TTTT".repeat(100);
+            let mut b2 = Vec::new();
+            encode(&b, &mut b2);
+            pad(&mut b2);
+
+            let res1 = align(&a2, a.len(), &b2, b.len(), a.len().max(b.len()) as i32);
+            let res2 = simd_align(&a2, a.len(), &b2, b.len(), a.len().max(b.len()) as i32);
+            assert_eq!(res1, res2);
+
+            let res1 = align(&a2, a.len(), &a2, a.len(), a.len() as i32);
+            let res2 = simd_align(&a2, a.len(), &a2, a.len(), a.len() as i32);
+            assert_eq!(res1, res2);
+
+            let a = b"AAAA".repeat(100);
+            let mut a2 = Vec::new();
+            encode(&a, &mut a2);
+            pad(&mut a2);
+            let b = b"TTTA".repeat(100);
+            let mut b2 = Vec::new();
+            encode(&b, &mut b2);
+            pad(&mut b2);
+
+            let res1 = align(&a2, a.len(), &b2, b.len(), a.len().max(b.len()) as i32);
+            let res2 = simd_align(&a2, a.len(), &b2, b.len(), a.len().max(b.len()) as i32);
+            assert_eq!(res1, res2);
+
+            let a = b"ATCGATCGATCGT".repeat(100);
+            let mut a2 = Vec::new();
+            encode(&a, &mut a2);
+            pad(&mut a2);
+            let b = b"ATCGATCGATCGA".repeat(100);
+            let mut b2 = Vec::new();
+            encode(&b, &mut b2);
+            pad(&mut b2);
+
+            let res1 = align(&a2, a.len(), &b2, b.len(), a.len().max(b.len()) as i32);
+            let res2 = simd_align(&a2, a.len(), &b2, b.len(), a.len().max(b.len()) as i32);
+            assert_eq!(res1, res2);
+
+            let a = b"ATCGATCGATCGAT".repeat(100);
+            let mut a2 = Vec::new();
+            encode(&a, &mut a2);
+            pad(&mut a2);
+            let b = b"ATCGATCGATCGAA".repeat(100);
+            let mut b2 = Vec::new();
+            encode(&b, &mut b2);
+            pad(&mut b2);
+
+            let res1 = align(&a2, a.len(), &b2, b.len(), a.len().max(b.len()) as i32);
+            let res2 = simd_align(&a2, a.len(), &b2, b.len(), a.len().max(b.len()) as i32);
+            assert_eq!(res1, res2);
+
+            let a = b"ATGATCATCGAT".repeat(100);
+            let mut a2 = Vec::new();
+            encode(&a, &mut a2);
+            pad(&mut a2);
+            let b = b"ATCGATCGATCGAA".repeat(100);
+            let mut b2 = Vec::new();
+            encode(&b, &mut b2);
+            pad(&mut b2);
+
+            let res1 = align(&a2, a.len(), &b2, b.len(), a.len().max(b.len()) as i32);
+            let res2 = simd_align(&a2, a.len(), &b2, b.len(), a.len().max(b.len()) as i32);
+            assert_eq!(res1, res2);
+        }
+    }
 }
